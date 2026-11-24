@@ -1,0 +1,117 @@
+name: Publish birthday site
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/configure-pages@v5
+      - name: Fetch and verify pinned static files
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          """Fetch a pinned public static site and reject missing, changed or unsafe files."""
+          from concurrent.futures import ThreadPoolExecutor
+          from pathlib import Path, PurePosixPath
+          from urllib.parse import urlsplit, urljoin, quote, urlencode
+          from urllib.request import Request, urlopen
+          import argparse
+          import hashlib
+          import json
+          import re
+          import time
+
+
+          def validate_manifest(manifest):
+              base = urlsplit(manifest['sourceUrl'])
+              if base.scheme != 'https' or not base.hostname or base.username or base.password or base.query or base.fragment:
+                  raise ValueError('A public HTTPS source URL without credentials/query is required.')
+              files = manifest['files']
+              paths = [entry['path'] for entry in files]
+              if not files or 'index.html' not in paths or len(paths) != len(set(paths)):
+                  raise ValueError('Manifest needs unique files and a root index.html.')
+              for entry in files:
+                  path = PurePosixPath(entry['path'])
+                  if path.is_absolute() or '\\' in entry['path'] or ':' in entry['path'] or any(part in ('..', '.') or part.startswith('.') for part in path.parts):
+                      raise ValueError('Unsafe manifest path: ' + entry['path'])
+                  if str(path) != entry['path'] or not re.fullmatch(r'[0-9a-f]{64}', entry['sha256']):
+                      raise ValueError('Invalid manifest entry: ' + entry['path'])
+                  if not isinstance(entry['bytes'], int) or entry['bytes'] < 0 or entry['bytes'] >= 100 * 1024 * 1024:
+                      raise ValueError('Unexpected file size: ' + entry['path'])
+              return files
+
+
+          def fetch_one(base_url, destination, entry):
+              url = urljoin(base_url.rstrip('/') + '/', quote(entry['path'], safe='/'))
+              url += '?' + urlencode({'snapshot': entry['sha256']})
+              target = destination / entry['path']
+              target.parent.mkdir(parents=True, exist_ok=True)
+              last_error = None
+              for attempt in range(3):
+                  try:
+                      request = Request(url, headers={'User-Agent': 'Mozilla/5.0 Polina-Pages-Build/1.0', 'Accept-Encoding': 'identity'})
+                      with urlopen(request, timeout=60) as response:
+                          if urlsplit(response.geturl()).hostname != urlsplit(base_url).hostname:
+                              raise ValueError('Unexpected redirect for ' + entry['path'])
+                          data = response.read(entry['bytes'] + 1)
+                      if len(data) != entry['bytes'] or hashlib.sha256(data).hexdigest() != entry['sha256']:
+                          raise ValueError('Size or SHA-256 mismatch: ' + entry['path'])
+                      target.write_bytes(data)
+                      return entry['path']
+                  except Exception as error:
+                      last_error = error
+                      if attempt < 2:
+                          time.sleep(attempt + 1)
+              raise RuntimeError('Cannot fetch verified file ' + entry['path']) from last_error
+
+
+          def download_site(manifest, destination):
+              files = validate_manifest(manifest)
+              destination = Path(destination).resolve()
+              if destination.exists() and any(destination.iterdir()):
+                  raise ValueError('Output directory must be empty: ' + str(destination))
+              destination.mkdir(parents=True, exist_ok=True)
+              with ThreadPoolExecutor(max_workers=6) as pool:
+                  jobs = [pool.submit(fetch_one, manifest['sourceUrl'], destination, entry) for entry in files]
+                  for job in jobs:
+                      print('Verified ' + job.result(), flush=True)
+              print(f'All {len(files)} files verified. GitHub Pages will serve these local copies.')
+
+
+          def main():
+              parser = argparse.ArgumentParser(description=__doc__)
+              parser.add_argument('manifest', type=Path)
+              parser.add_argument('--output', type=Path, default=Path('_site'))
+              args = parser.parse_args()
+              download_site(json.loads(args.manifest.read_text(encoding='utf-8')), args.output)
+
+
+
+          download_site(json.loads('{"sourceUrl": "https://secret-video-super-shibal.pages.dev/", "mediaVersion": 4, "createdUtc": "2026-11-24T02:25:31.845059+00:00", "files": [{"path": "app.js", "bytes": 16816, "sha256": "3f966a3cba4677e9ea2934ab406511975db9253aff20ee55521b7352286c522b"}, {"path": "assets/birthday-cat.png", "bytes": 2458761, "sha256": "8155481a81a1698ca7962c5d33cc94399c9256081cc400c03bf832cafe904cf6"}, {"path": "assets/daisy.svg", "bytes": 948, "sha256": "086ea3540277225fe9e333dbcc1fb736faaf9ad751e23d9128c689564eb9f09f"}, {"path": "assets/font-0.woff2", "bytes": 25344, "sha256": "864357482c9ec9755f8e017c02145e73cdfde7ace3b892ea87bc9a62052a66a6"}, {"path": "assets/font-1.woff2", "bytes": 45396, "sha256": "55a5d86e697f210278f3a6eab12abf30c73d19e097e98738150562be0bfd58ab"}, {"path": "assets/font-10.woff2", "bytes": 33760, "sha256": "052df74533250c2e0ca0c4bdd32de594e107d99c1648e63820ef9c6142067828"}, {"path": "assets/font-2.woff2", "bytes": 19572, "sha256": "f97b55783e417e37fce40600ad946b11eb63741a1cfdb2cd3907febc3cd8927f"}, {"path": "assets/font-3.woff2", "bytes": 51020, "sha256": "15f9638095ad5ec9816f93d66805ca1a87e71dc5a76b596bfce1c78d4704c405"}, {"path": "assets/font-4.woff2", "bytes": 10540, "sha256": "268f03691b3d06e57abcf20f9277e314ea8784298983aab5b40c1b91965027e1"}, {"path": "assets/font-5.woff2", "bytes": 15860, "sha256": "68e5e01d6265bd68967746d4f5a9d18d0e6cbb5d15583c7082d6384ab1229b27"}, {"path": "assets/font-6.woff2", "bytes": 25480, "sha256": "c74952a8c0c8c558c4f879f83773cf529d11350609f7073f5b2c5999dec46041"}, {"path": "assets/font-7.woff2", "bytes": 18168, "sha256": "2ec2d45d2ec0770e2c18cba2dba5126cf2dcff181d23ad192e9fffeb4af4b0b6"}, {"path": "assets/font-8.woff2", "bytes": 12400, "sha256": "d852d4d094a3a46d701d16245deb7ca83b16b5bd69e20aa0aba089392ad69474"}, {"path": "assets/font-9.woff2", "bytes": 28452, "sha256": "14e7d3079b75860e2ab50efc6c318c398fdb46ede9b56e625f12ae70a3c5d9a4"}, {"path": "assets/OFL-Caveat.txt", "bytes": 4385, "sha256": "1f9d81d094273d82f3898a1ee8b598a717d050ecbf5ff7bede105b704880157b"}, {"path": "assets/OFL-Onest.txt", "bytes": 4384, "sha256": "071195d8806e226faeee60259c28ca67b458227af5195a73f5cfcab06e3003bc"}, {"path": "assets/polina-birthday-web.mp4", "bytes": 24870253, "sha256": "e5ed8c78927f7cdfca35e7b079e2599b53cd26c7876be5d041fda092b55916cf"}, {"path": "assets/polina-ducks.jpg", "bytes": 124558, "sha256": "31a372525e51690661f7261dc316ad9d2436ebb0f14fff85cf337fe24bbb02f2"}, {"path": "assets/polina-jungle.jpg", "bytes": 328611, "sha256": "6469b1003a87d06cd4fb5b98ef1f5bc78085901e93b52297b3b85a0534c45200"}, {"path": "assets/polina-video-poster.jpg", "bytes": 423078, "sha256": "19becff51dfa99338e251284688a32da0db0f5f3903dafd22f372390ed050888"}, {"path": "assets/questions/carbonara.webp", "bytes": 83442, "sha256": "43a5213feb17efb228c76e7f6ac4f546f380fea98533870f7c5ee450a1ed9205"}, {"path": "assets/questions/cucumber.jpg", "bytes": 102125, "sha256": "fa288d4c8cac9f97123af00632577d79510b0c32688101f468e81c832f6f4d63"}, {"path": "assets/questions/lingonberries.jpg", "bytes": 124645, "sha256": "5287b134ff5c27cdadddfd3674b92fc59879a862d984642fcdaa170d40793759"}, {"path": "assets/questions/oatmeal.webp", "bytes": 99214, "sha256": "d7cb3511e88b25e950d2c4d05c73d5ad56ef860d0a789bb2ad8d562ab5874889"}, {"path": "assets/questions/steak.jpg", "bytes": 53658, "sha256": "d27dcd00321fb37616497a8951454a574420f166f5cc50a197fe7c8a5dff3c9e"}, {"path": "assets/questions/strawberries.jpg", "bytes": 70494, "sha256": "a0f9361e2405ded63133ecfcb9cd5871ff3f52c26bdce3e512651bcb8a3759f3"}, {"path": "assets/questions/sushki.jpg", "bytes": 63768, "sha256": "d84daa8e88ba42a9e020eeddf98347f8c41f0c31796021d27deb1cd90a822077"}, {"path": "assets/questions/yubileynoe.jpg", "bytes": 50307, "sha256": "843bff704c1cec4e22113e836d980ae8da8a1ce80c66e880042d33c97d7fd99b"}, {"path": "fonts.css", "bytes": 14238, "sha256": "2df3b5ca5556a1182d8658a068fd64a67c54187e350ef9acfd3d035407f9d5e2"}, {"path": "index.html", "bytes": 1476, "sha256": "bf9e20d98e17942c1c55cc5ee72a1408b8f81fd75f2e8726d9c42dddca5d51e7"}, {"path": "quiz-data.js", "bytes": 3486, "sha256": "bcc7cb6b422f3b3b8cf9c4e296cadc2e0c1e5a541d2883adfe8476d5744a2062"}, {"path": "styles.css", "bytes": 21385, "sha256": "17288cd4ca9f44ecaa689b3c758b88b08831d29baa34fbf3705c1ace34ea7f63"}]}'), Path('_site'))
+          PY
+      - uses: actions/upload-pages-artifact@v4
+        with:
+          path: _site
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
